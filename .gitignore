@@ -1,0 +1,38 @@
+# Secretos y entorno
+.env
+.env.*
+!.env.example
+
+# Proyectos de usuario (fotos de clientes, resultados, manifiestos)
+projects/
+
+# Salidas y exportaciones
+*.zip
+exports/
+
+# Imágenes de clientes / resultados generados
+*.heic
+references/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE / SO
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/secrets.toml
