@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-
 import streamlit as st
 
 from ..config import PROVIDER_HIGGSFIELD, PROVIDER_MOCK, Settings, load_settings
@@ -48,11 +46,22 @@ def _store_cached(projects_dir: str, max_reference_mb: int) -> Store:
     return Store(Path(projects_dir), max_reference_mb=max_reference_mb)
 
 
-@st.cache_resource(show_spinner=False)
-def _provider_cached(name: str, api_key: str) -> ImageProvider:
+def _build_provider(name: str, api_key: str) -> ImageProvider:
+    """Fábrica pura del proveedor: ``api_key`` debe llegar INTACTA (regresión GEN-30)."""
     if name == PROVIDER_MOCK:
         return MockProvider()
     return HiggsfieldProvider(api_key)
+
+
+@st.cache_resource(show_spinner=False)
+def _provider_cached(name: str, api_key: str) -> ImageProvider:
+    """Caché por (proveedor, credencial): cambiar de clave crea un recurso nuevo.
+
+    La credencial es argumento de la caché: Streamlit la sustituye por su hash
+    interno en la clave de caché, pero el valor completo es necesario para
+    reconstruir el recurso si nadie lo retiene. No se muestra ni se registra.
+    """
+    return _build_provider(name, api_key)
 
 
 def get_store(settings: Settings | None = None) -> Store:
@@ -79,8 +88,9 @@ def get_provider(settings: Settings | None = None) -> ImageProvider:
             "o en el panel lateral «Clave de API»."
         )
         st.stop()
-    cache_id = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16]
-    return _provider_cached(PROVIDER_HIGGSFIELD, f"{cache_id}:{api_key}")
+    # La credencial viaja INTACTA al adaptador: sin prefijos ni reformateos.
+    # Un prefijo de huella aquí provocaría Authorization inválida (401 real).
+    return _provider_cached(PROVIDER_HIGGSFIELD, api_key)
 
 
 @st.cache_resource(show_spinner=False)
@@ -116,6 +126,7 @@ def _runner_cached(
 
 
 def get_runner(settings: Settings | None = None) -> BatchRunner:
+    """Cola de ejecución con la MISMA credencial que ``get_provider`` (GEN-30)."""
     settings = settings or get_settings()
     if settings.provider == PROVIDER_MOCK:
         provider_name, provider_key = PROVIDER_MOCK, ""
@@ -143,11 +154,19 @@ def provider_badge(settings: Settings) -> None:
             "**Proveedor: SIMULACIÓN (mock)** — no se consume la API ni créditos. "
             "Ideal para probar la interfaz y los tests."
         )
-    else:
-        st.warning(
-            "**Proveedor: Higgsfield API (producción)** — cada lote consumirá "
-            "créditos reales de tu cuenta. Se pedirá confirmación antes de enviar."
-        )
+        if settings.has_api_key:
+            st.caption(
+                "🔑 `HF_API_KEY` cargada, pero el proveedor sigue en `mock`: la "
+                "clave **no** ha sido validada y no se enviará nada real. Para "
+                "activar Higgsfield pon `VISUALFORGE_PROVIDER=higgsfield` en `.env`."
+            )
+        return
+    st.warning(
+        "**Proveedor: Higgsfield API (producción)** — cada lote consumirá "
+        "créditos reales de tu cuenta. Se pedirá confirmación antes de enviar. "
+        "La clave cargada no equivale a acceso validado: errores 401/403/429 "
+        "indicarán clave rechazada, sin créditos o límite de peticiones."
+    )
 
 
 def api_key_panel(settings: Settings) -> None:
@@ -225,11 +244,28 @@ def estimate_total(jobs: list[Job]) -> tuple[str | None, bool]:
     return f"${sum(values):.3f}", complete
 
 
+def _provider_error_message(exc: ProviderError) -> str:
+    """Texto para el usuario, distinguiendo causa real (401/403/429/red)."""
+    explanations = {
+        "unauthorized": "Clave rechazada por la API (401): revisa que pegaste la "
+        "credencial completa sin modificarla en `HF_API_KEY`.",
+        "insufficient_credits": "Créditos insuficientes o cuenta sin acceso (403).",
+        "rate_limited": "Límite de peticiones alcanzado (429): espera y reintenta.",
+        "missing_api_key": "Falta la clave de API: no hay credencial cargada.",
+        "timeout": "Tiempo de espera agotado; reintenta sin cambiar parámetros.",
+        "network": "Problema de red; reintenta sin cambiar parámetros.",
+    }
+    explanation = explanations.get(exc.code)
+    if explanation:
+        return f"{explanation} ({exc.message})"
+    return str(exc)
+
+
 def ensure_provider_ready(provider: ImageProvider) -> bool:
     try:
         provider.model_specs()
     except ProviderError as exc:
-        st.error(f"Proveedor no disponible: {exc}")
+        st.error(f"Proveedor no disponible: {_provider_error_message(exc)}")
         return False
     return True
 

@@ -129,6 +129,38 @@ def test_error_400_con_detalle_en_lista(recorder: Recorder) -> None:
         provider.submit(MODEL, {"prompt": "x"}, "k")
 
 
+def test_error_401_mensaje_explicativo_con_detalle(recorder: Recorder) -> None:
+    recorder.add(
+        "POST",
+        f"https://api.higgsfield.ai/{MODEL}",
+        httpx.Response(401, json={"detail": "bad credential"}),
+    )
+    provider = make_provider(recorder)
+    with pytest.raises(ProviderError) as excinfo:
+        provider.submit(MODEL, {"prompt": "x"}, "k")
+    assert excinfo.value.code == "unauthorized"
+    message = str(excinfo.value)
+    assert "HTTP 401" in message
+    assert "credencial completa" in message
+    assert "bad credential" in message
+
+
+def test_error_429_mensaje_explicativo(recorder: Recorder) -> None:
+    recorder.add(
+        "POST",
+        f"https://api.higgsfield.ai/{MODEL}",
+        httpx.Response(429, json={"detail": "slow down"}),
+    )
+    provider = make_provider(recorder)
+    with pytest.raises(ProviderError) as excinfo:
+        provider.submit(MODEL, {"prompt": "x"}, "k")
+    assert excinfo.value.code == "rate_limited"
+    assert excinfo.value.retryable is True
+    message = str(excinfo.value)
+    assert "HTTP 429" in message
+    assert "slow down" in message
+
+
 def test_status_completado_con_imagenes(recorder: Recorder) -> None:
     recorder.add(
         "GET",

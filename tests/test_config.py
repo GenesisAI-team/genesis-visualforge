@@ -39,11 +39,25 @@ def test_provider_higgsfield_sin_clave(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.has_api_key is False
 
 
-def test_clave_presente_activa_higgsfield(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_clave_presente_sin_provider_mantiene_mock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GEN-30: la sola presencia de HF_API_KEY NO activa el proveedor real."""
     monkeypatch.setenv("HF_API_KEY", "key-id:key-secret")
     settings = load_settings()
-    assert settings.provider == "higgsfield"
+    assert settings.provider == "mock"
     assert settings.has_api_key is True
+
+
+def test_provider_higgsfield_explicito_con_clave(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """La selección del proveedor real es siempre deliberada (GEN-30)."""
+    monkeypatch.setenv("HF_API_KEY", "key-id:key-secret")
+    monkeypatch.setenv("VISUALFORGE_PROVIDER", "higgsfield")
+    settings = load_settings()
+    assert settings.provider == "higgsfield"
+    assert settings.api_key == "key-id:key-secret"
 
 
 def test_concurrencia_se_limita(monkeypatch: pytest.MonkeyPatch) -> None:

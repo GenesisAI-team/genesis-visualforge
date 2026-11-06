@@ -10,11 +10,25 @@ Issue: [GEN-11](https://linear.app/genesisnavarra/issue/GEN-11) · Rama: `feat/G
 python -m venv .venv
 .venv\Scripts\activate        # Windows; en Unix: source .venv/bin/activate
 pip install -e ".[dev]"
-copy .env.example .env        # introduce tu HF_API_KEY (formato key-id:key-secret)
+copy .env.example .env        # pega tu HF_API_KEY completa; para API real: VISUALFORGE_PROVIDER=higgsfield
 streamlit run app.py
 ```
 
-Sin clave, la app arranca en **modo mock** (generación simulada, sin coste).
+La app arranca en **modo mock** (generación simulada, sin coste), incluso con clave cargada: la
+selección del proveedor real siempre es deliberada (ver «Mock vs Higgsfield API»).
+
+## Mock vs Higgsfield API (GEN-30)
+
+| Estado | Activación | Créditos | Validación de clave |
+|---|---|---|---|
+| `VISUALFORGE_PROVIDER=mock` (por defecto al copiar `.env.example`) | explícita en `.env` | no consume | no se envía nada |
+| `VISUALFORGE_PROVIDER=higgsfield` | explícita en `.env` | consume créditos reales | los errores 401/403/429 indican clave rechazada/sin créditos/límite |
+
+- Pega la **credencial completa tal y como la copias** del panel de Higgsfield, sin separarla ni
+  modificarla (no se exige el formato `key-id:key-secret`): ver [quick-start](https://open.higgsfield.ai/quick-start).
+- Tener `HF_API_KEY` en `.env` **no activa** la API real ni equivale a acceso validado.
+- Toda la app muestra siempre una insignia con el proveedor activo; si la clave cargada no está
+  siendo usada por estar en `mock`, lo avisa explícitamente.
 
 ## Qué hace
 
@@ -47,15 +61,15 @@ src/visualforge/
     higgsfield.py       # adapter REST verificado contra la documentación
     mock.py             # proveedor simulado (tests y modo sin clave)
   ui/                   # páginas Streamlit
-tests/                  # pytest: 122 tests, sin red y sin cargos
+tests/                  # pytest: 132 tests, sin red y sin cargos
 ```
 
 ## Variables de entorno
 
 | Variable | Default | Descripción |
 |---|---|---|
-| `HF_API_KEY` | — | Clave de Higgsfield (`key-id:key-secret`). Sin ella → modo mock. |
-| `VISUALFORGE_PROVIDER` | auto | `mock` o `higgsfield` (auto: higgsfield si hay clave). |
+| `HF_API_KEY` | — | Credencial completa de Higgsfield, pegada tal cual (sin reformatear). Con `mock` no se envía. |
+| `VISUALFORGE_PROVIDER` | `mock` | `mock` o `higgsfield`. La selección del proveedor real es siempre deliberada. |
 | `VISUALFORGE_CONCURRENCY` | `2` | 1–8 jobs en paralelo. |
 | `VISUALFORGE_PROJECTS_DIR` | `projects/` | Ruta de proyectos (relativa a la raíz o absoluta). |
 | `VISUALFORGE_MAX_REF_MB` | `25` | Límite local por foto de referencia. |
@@ -63,7 +77,7 @@ tests/                  # pytest: 122 tests, sin red y sin cargos
 ## Desarrollo
 
 ```bash
-pytest            # 122 tests
+pytest            # 132 tests
 ruff check .
 ```
 
