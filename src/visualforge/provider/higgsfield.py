@@ -65,6 +65,8 @@ def _classify_error(response: httpx.Response) -> ProviderError:
         retryable = "concurrency" in detail.lower()
     elif status == 401:
         code = "unauthorized"
+        explain = "Clave rechazada (HTTP 401): pega la credencial completa sin modificarla en `HF_API_KEY`."
+        detail = f"{explain} {detail}" if detail else explain
     elif status == 403:
         code = "insufficient_credits"
         detail = f"Créditos insuficientes o acceso denegado: {detail}"
@@ -80,6 +82,8 @@ def _classify_error(response: httpx.Response) -> ProviderError:
     elif status == 429:
         code = "rate_limited"
         retryable = True
+        explain = "Límite de peticiones alcanzado (HTTP 429): espera y reintenta."
+        detail = f"{explain} {detail}" if detail else explain
     elif status >= 500:
         code = "server_error"
         retryable = True

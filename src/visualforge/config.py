@@ -56,8 +56,10 @@ def load_settings(env_file: Path | None = None) -> Settings:
             f"VISUALFORGE_PROVIDER inválido: '{raw_provider}'. Use 'mock' o 'higgsfield'."
         )
     else:
-        # Sin clave no tiene sentido el proveedor real: mock por defecto.
-        provider = PROVIDER_HIGGSFIELD if api_key else PROVIDER_MOCK
+        # GEN-30: la sola presencia de una clave NO activa el proveedor real.
+        # La selección de mock/higgsfield es siempre deliberada; el modo mock
+        # es el arranque seguro sin gasto accidental.
+        provider = PROVIDER_MOCK
 
     concurrency_raw = os.environ.get("VISUALFORGE_CONCURRENCY", "").strip()
     try:
