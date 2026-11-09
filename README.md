@@ -34,12 +34,23 @@ selección del proveedor real siempre es deliberada (ver «Mock vs Higgsfield AP
 
 1. **Proyectos** — un proyecto por cliente: brief, dirección de arte (prompt base) y fotos de referencia.
 2. **Prompts** — importación masiva «uno por línea» (`Nombre :: prompt` o solo el prompt) + editor de tabla con campo «mantener» por asset.
-3. **Lote** — modelo (`marketing-studio/image` o `.../flare`), resolución, ratio, calidad y concurrencia (por defecto 2). Estimación de coste antes de enviar. Cada imagen se envía como job independiente con su `idempotency_key` persistida.
+3. **Lote** — modelo (`marketing-studio/image` o `.../flare`), resolución, ratio, calidad y concurrencia **por lote** (selector 1–4, por defecto 2: lo elegido manda para ese lote; véase «Concurrencia: elegida por lote vs. arranque vs. techo global»). Estimación de coste antes de enviar. Cada imagen se envía como job independiente con su `idempotency_key` persistida.
 4. **Resultados** — polling con backoff, cancelación real en el proveedor, reanudación tras reiniciar la app, regeneración selectiva por imagen (`slug-vN`) y exportación a `originals/` + `web/` (WebP/JPEG/PNG) + ZIP con `README-assets.md`, `manifest.json` y `prompts.json`.
 
 ## Garantías de ejecución
 
-- Concurrencia limitada (2 por defecto, tope 8).
+- **Concurrencia: elegida por lote vs. valor de arranque vs. techo global (GEN-15).**
+  - El selector del lote (UI, **1–4**, por defecto **2**) manda para **ese lote**: con 4 se
+    lanzan hasta 4 solicitudes simultáneas y el resto del lote espera en cola su turno,
+    lanzándose automáticamente al liberarse capacidad (sin nuevos clics y sin límite de
+    tamaño del lote).
+  - `VISUALFORGE_CONCURRENCY` (**1–8**) es solo la **preferencia/valor de arranque**:
+    sugiere el valor inicial del selector (recortado a 1–4 con `.env=8` o superior) y
+    sirve de fallback si un lote carece de concurrencia válida. **Nunca** actúa como
+    techo silencioso: `.env=2` + selector 4 ejecutará 4.
+  - **Techo global de seguridad: 8 jobs activos** como máximo, sin importar cuántos
+    lotes se ejecuten a la vez (la capacidad se reparte entre lotes sin penalizar
+    cola, reintentos, polling, idempotencia ni cancelación).
 - La misma `idempotency_key` se reutiliza ante fallos ambiguos: el proveedor devuelve el mismo `request_id` y no se duplica el cargo.
 - Un job con `request_id` **jamás se vuelve a enviar**: solo se consulta estado.
 - Cancelar antes de enviar no genera cargo; cancelar en curso usa el endpoint documentado de Higgsfield.
@@ -54,14 +65,14 @@ src/visualforge/
   config.py             # .env / variables de entorno
   prompts.py            # slugs, importador, composición del prompt final
   storage.py            # proyectos en disco + lotes/jobs en SQLite (WAL)
-  jobs.py               # BatchRunner: cola, reintentos, cancelación, reanudación
+  jobs.py               # BatchRunner: cola por lote, reintentos, cancelación, reanudación
   export.py             # optimización web (Pillow) y ZIP
   provider/
     base.py             # contrato ImageProvider
     higgsfield.py       # adapter REST verificado contra la documentación
     mock.py             # proveedor simulado (tests y modo sin clave)
   ui/                   # páginas Streamlit
-tests/                  # pytest: 132 tests, sin red y sin cargos
+tests/                  # pytest: suite completa, sin red y sin cargos
 ```
 
 ## Variables de entorno
@@ -70,14 +81,14 @@ tests/                  # pytest: 132 tests, sin red y sin cargos
 |---|---|---|
 | `HF_API_KEY` | — | Credencial completa de Higgsfield, pegada tal cual (sin reformatear). Con `mock` no se envía. |
 | `VISUALFORGE_PROVIDER` | `mock` | `mock` o `higgsfield`. La selección del proveedor real es siempre deliberada. |
-| `VISUALFORGE_CONCURRENCY` | `2` | 1–8 jobs en paralelo. |
+| `VISUALFORGE_CONCURRENCY` | `2` | Preferencia/valor de arranque de concurrencia (1–8). No es el techo de un lote: el selector de la UI manda (1–4, default 2) y el límite de seguridad global del proceso es 8 jobs activos. |
 | `VISUALFORGE_PROJECTS_DIR` | `projects/` | Ruta de proyectos (relativa a la raíz o absoluta). |
 | `VISUALFORGE_MAX_REF_MB` | `25` | Límite local por foto de referencia. |
 
 ## Desarrollo
 
 ```bash
-pytest            # 132 tests
+pytest            # suite completa (sin red y sin cargos)
 ruff check .
 ```
 
