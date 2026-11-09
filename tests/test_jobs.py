@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from dataclasses import replace
+
 import pytest
 
 from conftest import FLARE_CONFIG, make_project_with_prompts, wait_for
-from visualforge.jobs import BatchRunner, plan_batch, plan_regeneration
+from visualforge.jobs import BatchRunner, RunnerConfig, plan_batch, plan_regeneration
 from visualforge.models import (
     BATCH_RUNNING,
+    Batch,
     BatchConfig,
     JobStatus,
     Project,
@@ -28,6 +32,46 @@ def _make_planned(store: Store, provider: MockProvider, count: int):
     batch, jobs = plan_batch(store, provider, demo, FLARE_CONFIG)
     store.create_batch(batch, jobs)
     return batch, jobs
+
+
+@contextmanager
+def _runner_with(
+    store: Store,
+    provider: MockProvider,
+    concurrency: int,
+    global_max: int = 8,
+):
+    """Runner rápido con la ``RunnerConfig`` que define cada caso GEN-15.
+
+    ``concurrency`` simula el valor de arranque de ``.env`` (1-8) y
+    ``global_max`` el techo de seguridad del proceso. El proveedor SIEMPRE es
+    el mock: jamás se lanza una generación real de Higgsfield en tests.
+    """
+    config = RunnerConfig(
+        concurrency=concurrency,
+        global_max=global_max,
+        poll_initial=0.0,
+        poll_max=0.01,
+        poll_jitter=0.0,
+        backoff_max=0.01,
+    )
+    instance = BatchRunner(store, provider, config)
+    try:
+        yield instance
+    finally:
+        instance.shutdown(wait=False)
+
+
+def _planned_with(
+    store: Store, provider: MockProvider, count: int, concurrency: int
+) -> Batch:
+    """Lote planificado y persistido con la concurrencia elegida en la 'UI'."""
+    demo = make_project_with_prompts(store, count)
+    batch, jobs = plan_batch(
+        store, provider, demo, replace(FLARE_CONFIG, concurrency=concurrency)
+    )
+    store.create_batch(batch, jobs)
+    return batch
 
 
 @pytest.fixture
@@ -346,3 +390,114 @@ def test_provider_error_no_reintentable_en_status(
     assert job is not None
     assert job.status == JobStatus.FAILED
     assert "Consulta de estado fallida" in (job.error or "")
+
+
+# ---------------------------------------------------------------------------
+# GEN-15: la concurrencia elegida en la UI manda por lote; techo global 8.
+# Todos los tests usan el proveedor mock: nunca una generación facturable.
+# ---------------------------------------------------------------------------
+
+
+def test_gen15_env_2_con_ui_4_alcanza_4_y_no_supera_4(
+    store: Store, provider: MockProvider
+) -> None:
+    """REGRESIÓN .env=2 + UI=4: el máximo efectivo es 4, no 2 por herencia."""
+    provider.scenarios.polls_to_complete = 1_000_000  # nada finaliza mientras se mide
+    batch = _planned_with(store, provider, count=6, concurrency=4)
+    with _runner_with(store, provider, concurrency=2) as runner:  # arranque .env=2
+        assert runner.start_batch(batch.id) == 6
+        assert wait_for(lambda: provider.max_in_flight >= 4, timeout=10), (
+            "con UI=4 deben poder coexistir 4 generaciones (.env=2 no es techo)"
+        )
+        assert provider.max_in_flight <= 4
+        runner.cancel_batch(batch.id)
+        assert runner.wait(batch.id, timeout=30)
+    assert _all_terminal(store, batch.id)
+
+
+def test_gen15_env_5_con_ui_2_la_ui_manda(store: Store, provider: MockProvider) -> None:
+    """.env=5 + UI=2: el lote corre con 2; el valor de arranque no lo supera."""
+    provider.scenarios.polls_to_complete = 1_000_000
+    batch = _planned_with(store, provider, count=6, concurrency=2)
+    with _runner_with(store, provider, concurrency=5) as runner:  # arranque .env=5
+        assert runner.start_batch(batch.id) == 6
+        assert wait_for(lambda: provider.max_in_flight >= 2, timeout=10)
+        assert provider.max_in_flight <= 2
+        runner.cancel_batch(batch.id)
+        assert runner.wait(batch.id, timeout=30)
+    assert _all_terminal(store, batch.id)
+
+
+def test_gen15_lote_de_12_con_selector_4_completa_sin_pasarse(
+    store: Store, provider: MockProvider
+) -> None:
+    """12 imágenes con UI=4: hasta 4 simultáneas, 8 en cola, las 12 completadas."""
+    batch = _planned_with(store, provider, count=12, concurrency=4)
+    with _runner_with(store, provider, concurrency=2) as runner:  # arranque .env=2
+        assert runner.start_batch(batch.id) == 12
+        assert runner.wait(batch.id, timeout=60)
+    jobs = store.get_jobs(batch.id)
+    assert len(jobs) == 12
+    assert all(job.status == JobStatus.COMPLETED for job in jobs)
+    assert all(job.attempts == 1 for job in jobs)  # sin reintentos: cada envío único
+    assert provider.max_in_flight <= 4
+    # Sin duplicados: una ayuda de cargo por imagen y una clave distinta por job.
+    assert len(provider.charged_keys) == 12
+    assert len(set(provider.charged_keys)) == 12
+
+
+def test_gen15_dos_lotes_en_paralelo_no_superan_ocho(
+    store: Store, provider: MockProvider
+) -> None:
+    """Dos lotes activos: la suma de jobs en vuelo nunca supera el techo 8."""
+    provider.scenarios.polls_to_complete = 1_000_000
+    batch_a = _planned_with(store, provider, count=6, concurrency=4)
+    batch_b = _planned_with(store, provider, count=6, concurrency=4)
+    with _runner_with(store, provider, concurrency=2) as runner:
+        assert runner.start_batch(batch_a.id) == 6
+        assert runner.start_batch(batch_b.id) == 6
+        assert wait_for(lambda: provider.max_in_flight >= 8, timeout=10), (
+            "ambos lotes deben compaginar capacidad (4+4) sin bloquearse entre sí"
+        )
+        assert provider.max_in_flight <= 8
+        runner.cancel_batch(batch_a.id)
+        runner.cancel_batch(batch_b.id)
+        assert runner.wait(batch_a.id, timeout=30)
+        assert runner.wait(batch_b.id, timeout=30)
+    assert _all_terminal(store, batch_a.id)
+    assert _all_terminal(store, batch_b.id)
+
+
+def test_gen15_configuracion_invalida_cae_en_el_valor_de_arranque(
+    store: Store, provider: MockProvider
+) -> None:
+    """BatchConfig sin concurrencia válida (<=0): fallback al arranque (.env)."""
+    provider.scenarios.polls_to_complete = 1_000_000
+    batch = _planned_with(store, provider, count=6, concurrency=0)
+    with _runner_with(store, provider, concurrency=3) as runner:
+        runner.start_batch(batch.id)
+        assert wait_for(lambda: provider.max_in_flight >= 3, timeout=10)
+        assert provider.max_in_flight <= 3
+        runner.cancel_batch(batch.id)
+        assert runner.wait(batch.id, timeout=30)
+    assert _all_terminal(store, batch.id)
+
+
+def test_gen15_techo_global_configurable_por_debajo_de_8(
+    store: Store, provider: MockProvider
+) -> None:
+    """Dos lotes con límite 3 cada uno y techo global 2: nunca más de 2 en vuelo."""
+    provider.scenarios.polls_to_complete = 1_000_000
+    batch_a = _planned_with(store, provider, count=6, concurrency=3)
+    batch_b = _planned_with(store, provider, count=6, concurrency=3)
+    with _runner_with(store, provider, concurrency=3, global_max=2) as runner:
+        runner.start_batch(batch_a.id)
+        runner.start_batch(batch_b.id)
+        assert wait_for(lambda: provider.max_in_flight >= 2, timeout=10)
+        assert provider.max_in_flight <= 2
+        runner.cancel_batch(batch_a.id)
+        runner.cancel_batch(batch_b.id)
+        assert runner.wait(batch_a.id, timeout=30)
+        assert runner.wait(batch_b.id, timeout=30)
+    assert _all_terminal(store, batch_a.id)
+    assert _all_terminal(store, batch_b.id)
