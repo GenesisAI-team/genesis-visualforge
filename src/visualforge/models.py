@@ -38,6 +38,26 @@ REMOTE_TERMINAL_MAP = {
 }
 
 # ---------------------------------------------------------------------------
+# Límites de concurrencia (GEN-15)
+#
+# Tres conceptos distintos que NO se deben confundir:
+#
+# - ``GLOBAL_MAX_CONCURRENCY``: techo técnico de seguridad del PROCESO. Nunca
+#   hay más jobs activos (submit/polling/descarga) que este número, incluso
+#   con varios lotes en paralelo.
+# - ``UI_CONCURRENCY_*``: rango del selector por lote en la interfaz (1-4,
+#   por defecto 2). La cifra elegida por el usuario manda para ESE lote.
+# - ``VISUALFORGE_CONCURRENCY`` (config.py): preferencia/valor de arranque
+#   (1-8). Es el default inicial del selector (recortado a 1-4) y el fallback
+#   ante configuraciones inválidas; NUNCA es un techo del lote.
+# ---------------------------------------------------------------------------
+
+GLOBAL_MAX_CONCURRENCY = 8
+UI_CONCURRENCY_MIN = 1
+UI_CONCURRENCY_MAX = 4
+UI_CONCURRENCY_DEFAULT = 2
+
+# ---------------------------------------------------------------------------
 # Restricciones locales de referencias (MIME soportado por la API de Higgsfield)
 # ---------------------------------------------------------------------------
 

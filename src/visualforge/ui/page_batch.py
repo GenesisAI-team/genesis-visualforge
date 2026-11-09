@@ -8,10 +8,13 @@ import time
 import pandas as pd
 import streamlit as st
 
-from ..config import PROVIDER_MOCK, Settings
+from ..config import PROVIDER_MOCK, Settings, ui_default_concurrency
 from ..jobs import BatchRunner, plan_batch, plan_regeneration
 from ..models import (
     DEFAULT_MODEL_ID,
+    UI_CONCURRENCY_DEFAULT,
+    UI_CONCURRENCY_MAX,
+    UI_CONCURRENCY_MIN,
     Batch,
     BatchConfig,
     Job,
@@ -100,11 +103,13 @@ def _config_tab(
 
     concurrency = st.slider(
         "Concurrencia (solicitudes simultáneas)",
-        min_value=1,
-        max_value=4,
-        value=settings.concurrency,
+        min_value=UI_CONCURRENCY_MIN,
+        max_value=UI_CONCURRENCY_MAX,
+        value=ui_default_concurrency(settings.concurrency),
         key="lote_concurrency",
-        help="Conservador por defecto para respetar los límites de la API.",
+        help="La cifra elegida manda para ESTE lote: se lanzan hasta esas "
+        "solicitudes en paralelo y el resto espera su turno. El valor del "
+        "entorno (.env) solo sugiere el punto inicial (default 2).",
     )
 
     if st.button("🔍 Previsualizar lote", type="primary"):
@@ -403,7 +408,9 @@ def _start_regeneration(
             resolution=st.session_state.get("lote_resolution", "2k"),
             aspect_ratio=st.session_state.get("lote_ratio", "auto"),
             quality=st.session_state.get("lote_quality"),
-            concurrency=st.session_state.get("lote_concurrency", 2),
+            concurrency=ui_default_concurrency(
+                st.session_state.get("lote_concurrency", UI_CONCURRENCY_DEFAULT)
+            ),
         )
     elif original_batch is not None:
         config = original_batch.config
