@@ -88,9 +88,17 @@ tests/                  # pytest: suite completa, sin red y sin cargos
 ## Desarrollo
 
 ```bash
-pytest            # suite completa (sin red y sin cargos)
+python -m pytest   # suite completa (sin red y sin cargos); idéntica a CI
 ruff check .
 ```
+
+> `python -m pytest` (no `pytest` a secas): los tests importan helpers de
+> `tests.conftest`, que solo se resuelve si la raíz del repo está en
+> `sys.path`. Detalles en [`docs/ci.md`](docs/ci.md).
+
+## CI
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) ejecuta en cada PR y en cada push a `main` los mismos gates que en local: `ruff check .` y `python -m pytest`, con Pythons 3.11 y 3.13 y fail-fast. **Siempre en modo mock**: la CI no usa ni requiere `HF_API_KEY` real, no accede a la red del proveedor y no consume créditos (ver [`docs/ci.md`](docs/ci.md)).
 
 ## Seguridad
 

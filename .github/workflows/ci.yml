@@ -1,0 +1,68 @@
+# GEN-49 — CI automática sin consumo de créditos Higgsfield.
+#
+# Qué hace:
+#   1. Instala Python y las dependencias dev de forma reproducible
+#      (las versiones están fijadas en pyproject.toml).
+#   2. Ejecuta los dos gates del repo: `ruff check .` y `python -m pytest`.
+#   3. Fail-fast: el job se detiene en el primer paso que falla y, con la
+#      matriz de Pythons, `fail-fast: true` cancela el resto.
+#
+# Garantía de mocks (sin gasto, sin red del proveedor):
+#   - La ruta de GitHub Actions NO referencia ningún secret: no existe forma
+#     de que un `HF_API_KEY` real llegue a CI.
+#   - El entorno fuerza `HF_API_KEY=""` y `VISUALFORGE_PROVIDER=mock`: con
+#     `config.py` (selección deliberada GEN-30) el proveedor activo es siempre
+#     `MockProvider`, y `load_dotenv(override=False)` no puede inyectar una
+#     clave real desde un `.env` del checkout. Los tests usan el mock
+#     directamente (tests/conftest.py: fixture provider = MockProvider).
+#
+# Reproducción local: ver `docs/ci.md` (misma secuencia de comandos).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  HF_API_KEY: ""
+  VISUALFORGE_PROVIDER: mock
+
+jobs:
+  gates:
+    name: gates (py ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Instalar dependencias dev (reproducible, versiones fijadas en pyproject.toml)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Gate 1/2 — lint (ruff check .)
+        run: ruff check .
+
+      - name: Gate 2/2 — tests (python -m pytest, proveedor mock)
+        run: python -m pytest
