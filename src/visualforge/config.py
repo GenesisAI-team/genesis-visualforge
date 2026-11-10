@@ -12,7 +12,12 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from .models import MAX_REFERENCE_MB_DEFAULT, ValidationError
+from .models import (
+    MAX_REFERENCE_MB_DEFAULT,
+    UI_CONCURRENCY_MAX,
+    UI_CONCURRENCY_MIN,
+    ValidationError,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -31,6 +36,21 @@ class Settings:
     @property
     def has_api_key(self) -> bool:
         return bool(self.api_key)
+
+
+def ui_default_concurrency(value: int) -> int:
+    """Valor inicial del selector de concurrencia de la UI.
+
+    GEN-15: recorta la preferencia de arranque (``VISUALFORGE_CONCURRENCY``,
+    rango 1-8) al rango del control ``1-UI_CONCURRENCY_MAX``. Con ``.env=8``
+    el slider se sigue creando (default 4); el valor de `.env` nunca actúa
+    como techo del lote: solo sugiere un punto de partida.
+    """
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return UI_CONCURRENCY_MIN
+    return max(UI_CONCURRENCY_MIN, min(value, UI_CONCURRENCY_MAX))
 
 
 def _resolve_projects_dir(raw: str | None) -> Path:

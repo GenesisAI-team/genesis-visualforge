@@ -1,8 +1,15 @@
 """Ejecución de lotes: cola con concurrencia controlada y reintentos seguros.
 
-Garantías (requisitos GEN-11):
+Garantías (requisitos GEN-11 y GEN-15):
 
-- Concurrencia limitada (por defecto 2) mediante ``ThreadPoolExecutor``.
+- Concurrencia POR LOTE: cada lote corre con la cifra elegida en la UI
+  (``BatchConfig.concurrency``, selector 1-4 con default 2), no con la del
+  entorno. Los jobs sobrantes esperan en la cola del lote y se lanzan al
+  liberarse capacidad (ventana deslizante), sin nuevos clics ni duplicados.
+- Techo global de seguridad: el proceso nunca supera 8 jobs activos, ni
+  siquiera con varios lotes en paralelo. ``VISUALFORGE_CONCURRENCY`` (1-8)
+  es preferencia/valor de arranque: default ante configuraciones inválidas y
+  sugerencia inicial de la UI; JAMÁS un techo silencioso del lote.
 - Cada job guarda su ``idempotency_key`` ANTES del primer envío; los reintentos
   tras fallos ambiguos (timeout/5xx) reutilizan la misma clave -> el proveedor
   devuelve el mismo ``request_id`` y no se duplica el cargo.
@@ -20,6 +27,7 @@ from __future__ import annotations
 import random
 import threading
 import time
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
@@ -27,7 +35,9 @@ from typing import Any
 from .models import (
     BATCH_FINISHED,
     BATCH_RUNNING,
+    GLOBAL_MAX_CONCURRENCY,
     REMOTE_TERMINAL_MAP,
+    UI_CONCURRENCY_DEFAULT,
     Batch,
     BatchConfig,
     Job,
@@ -51,7 +61,18 @@ _NSFW_ERROR = (
 
 @dataclass
 class RunnerConfig:
-    concurrency: int = 2
+    """Ajustes del runner (GEN-15 separa default por lote y techo global).
+
+    ``concurrency``: valor de ARRANQUE (preferencia del entorno, 1-8). Es el
+    fallback ante lotes sin concurrencia válida y no limita nunca por debajo
+    de lo elegido en la UI.
+    ``global_max``: techo de seguridad del PROCESO; dimensiona el pool de
+    hilos. Nunca supera GLOBAL_MAX_CONCURRENCY (8), ni tan siquiera configurando
+    más, aunque el proyecto lo admita técnica y teóricamente.
+    """
+
+    concurrency: int = UI_CONCURRENCY_DEFAULT
+    global_max: int = GLOBAL_MAX_CONCURRENCY
     poll_initial: float = 2.0
     poll_max: float = 10.0
     poll_jitter: float = 0.5
@@ -233,7 +254,13 @@ def plan_regeneration(
 
 
 class BatchRunner:
-    """Orquesta lotes: envío, polling, descarga, cancelación y reanudación."""
+    """Orquesta lotes: envío, polling, descarga, cancelación y reanudación.
+
+    GEN-15 planifica con una ventana deslizante POR LOTE dentro de un pool
+    compartido: cada lote mantiene en vuelo como máximo su concurrencia
+    elegida (``BatchConfig.concurrency`` acotada al pool) y el pool nunca
+    ejecuta más de ``global_max`` jobs del proceso a la vez.
+    """
 
     def __init__(
         self,
@@ -244,13 +271,18 @@ class BatchRunner:
         self.store = store
         self.provider = provider
         self.config = config or RunnerConfig()
+        self._pool_size = max(1, min(self.config.global_max, GLOBAL_MAX_CONCURRENCY))
         self._executor = ThreadPoolExecutor(
-            max_workers=max(1, self.config.concurrency),
+            max_workers=self._pool_size,
             thread_name_prefix="visualforge-job",
         )
         self._lock = threading.Lock()
         self._active: set[str] = set()
         self._enqueued: set[str] = set()
+        # GEN-15: estado por lote de la ventana deslizante.
+        self._batch_limits: dict[str, int] = {}
+        self._batch_queues: dict[str, deque[str]] = {}
+        self._batch_inflight: dict[str, int] = {}
         self._cancel_events: dict[str, threading.Event] = {}
         self._futures: dict[str, list[Future[None]]] = {}
 
@@ -267,23 +299,21 @@ class BatchRunner:
             raise ValidationError("El lote ya finalizó; use la regeneración selectiva.")
 
         self.store.set_batch_status(batch_id, BATCH_RUNNING)
-        event = threading.Event()
+        jobs = self.store.get_jobs(batch_id)
         with self._lock:
-            self._cancel_events[batch_id] = event
-
-        started = 0
-        futures: list[Future[None]] = []
-        for job in self.store.get_jobs(batch_id):
-            if job.status != JobStatus.PENDING:
-                continue
-            with self._lock:
+            self._cancel_events.setdefault(batch_id, threading.Event())
+            self._batch_limits[batch_id] = self._limit_for(batch)
+            queue = self._batch_queues.setdefault(batch_id, deque())
+            started = 0
+            for job in jobs:
+                if job.status != JobStatus.PENDING:
+                    continue
                 if job.id in self._enqueued or job.id in self._active:
                     continue  # ya en cola de este runner: no duplicar
+                queue.append(job.id)
                 self._enqueued.add(job.id)
-            futures.append(self._executor.submit(self._run_job, job.id, batch_id, event))
-            started += 1
-        with self._lock:
-            self._futures.setdefault(batch_id, []).extend(futures)
+                started += 1
+        self._refill(batch_id)
 
         if started == 0:
             self._maybe_finish_batch(batch_id)
@@ -292,6 +322,7 @@ class BatchRunner:
     def resume(self) -> int:
         """Reanuda jobs activos tras reiniciar la app. Idempotente por proceso."""
         resumed = 0
+        to_refill: set[str] = set()
         for job in self.store.active_jobs():
             batch = self.store.get_batch(job.batch_id)
             can_resume = bool(
@@ -300,13 +331,17 @@ class BatchRunner:
             )
             if not can_resume:
                 continue
-            event = self._cancel_events.setdefault(job.batch_id, threading.Event())
             with self._lock:
-                if job.id in self._active or job.id in self._enqueued:
+                self._cancel_events.setdefault(job.batch_id, threading.Event())
+                self._batch_limits.setdefault(job.batch_id, self._limit_for(batch))
+                if job.id in self._enqueued or job.id in self._active:
                     continue
+                self._batch_queues.setdefault(job.batch_id, deque()).append(job.id)
                 self._enqueued.add(job.id)
-            self._executor.submit(self._run_job, job.id, job.batch_id, event)
+            to_refill.add(job.batch_id)
             resumed += 1
+        for batch_id in to_refill:
+            self._refill(batch_id)
         return resumed
 
     def cancel_batch(self, batch_id: str) -> dict[str, int]:
@@ -351,17 +386,27 @@ class BatchRunner:
         return stats
 
     def wait(self, batch_id: str, timeout: float = 60.0) -> bool:
-        """Bloquea hasta que terminen los futures de un lote (principalmente tests)."""
-        with self._lock:
-            futures = list(self._futures.get(batch_id, []))
+        """Bloquea hasta que terminen los jobs gestionados del lote (tests/UI).
+
+        GEN-15: la ventana deslizante publica futures por tandas; tras esperar
+        cada tanda se revisita el registro hasta agotar lo recién lanzado y la
+        cola local del lote.
+        """
         deadline = time.time() + timeout
-        for future in futures:
-            remaining = max(0.0, deadline - time.time())
-            try:
-                future.result(timeout=remaining)
-            except TimeoutError:
-                return False
-        return True
+        waited = 0
+        while True:
+            with self._lock:
+                futures = tuple(self._futures.get(batch_id, ()))[waited:]
+                has_queued = bool(self._batch_queues.get(batch_id))
+            for future in futures:
+                remaining = max(0.0, deadline - time.time())
+                try:
+                    future.result(timeout=remaining)
+                except TimeoutError:
+                    return False
+            waited += len(futures)
+            if not futures and not has_queued:
+                return True
 
     def shutdown(self, wait: bool = True) -> None:
         self._executor.shutdown(wait=wait, cancel_futures=False)
@@ -393,6 +438,12 @@ class BatchRunner:
             with self._lock:
                 self._active.discard(job_id)
                 self._enqueued.discard(job_id)
+                inflight = self._batch_inflight.get(batch_id, 0)
+                if inflight > 0:
+                    self._batch_inflight[batch_id] = inflight - 1
+            # GEN-15: el hueco liberado lanza el siguiente job de la cola del
+            # lote; la capacidad del pool es global para todos los lotes.
+            self._refill(batch_id)
             self._maybe_finish_batch(batch_id)
 
     def _submit(self, job: Job, cancel_event: threading.Event) -> Job | None:
@@ -575,6 +626,61 @@ class BatchRunner:
     # ------------------------------------------------------------------
     # Utilidades
     # ------------------------------------------------------------------
+
+    def _limit_for(self, batch: Batch | None) -> int:
+        """Límite efectivo de concurrencia de un lote (GEN-15).
+
+        Manda la cifra elegida para el lote (``BatchConfig.concurrency``),
+        acotada al pool global. Si el lote carece de un valor válido (p. ej.
+        datos antiguos o ``<= 0``) se usa la preferencia de arranque
+        (``RunnerConfig.concurrency``), nunca un valor heredado superior.
+        """
+        value = (
+            batch.config.concurrency if batch is not None else self.config.concurrency
+        )
+        if not isinstance(value, int) or value < 1:
+            value = self.config.concurrency
+        return max(1, min(value, self._pool_size))
+
+    def _refill(self, batch_id: str) -> None:
+        """Lanza los siguientes jobs del lote mientras haya ventana disponible.
+
+        Mantendrá en vuelo (enviados al pool y no terminados) como máximo el
+        límite del lote; el resto permanece en su cola local. Los jobs que
+        quedaron cancelados mientras esperaban se saltan para liberar hueco.
+        """
+        limit = self._batch_limits.get(batch_id)
+        if limit is None:
+            return
+        while True:
+            with self._lock:
+                if self._batch_inflight.get(batch_id, 0) >= limit:
+                    return
+                queue = self._batch_queues.get(batch_id)
+                if not queue:
+                    return
+                job_id = queue.popleft()
+                self._batch_inflight[batch_id] = (
+                    self._batch_inflight.get(batch_id, 0) + 1
+                )
+                event = self._cancel_events.get(batch_id)
+            job = self.store.get_job(job_id)
+            if job is None or job.is_terminal:
+                # Cancelado o borrado mientras esperaba: libera el hueco.
+                with self._lock:
+                    self._enqueued.discard(job_id)
+                    self._batch_inflight[batch_id] = max(
+                        0, self._batch_inflight[batch_id] - 1
+                    )
+                continue
+            future = self._executor.submit(
+                self._run_job,
+                job_id,
+                batch_id,
+                event if event is not None else threading.Event(),
+            )
+            with self._lock:
+                self._futures.setdefault(batch_id, []).append(future)
 
     def _fail(self, job_id: str, message: str) -> None:
         self.store.update_job(

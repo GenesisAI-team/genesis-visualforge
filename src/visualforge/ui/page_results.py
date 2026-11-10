@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from ..config import Settings
+from ..config import Settings, ui_default_concurrency
 from ..export import ExportOptions, export_batch
 from ..jobs import BatchRunner, plan_regeneration
 from ..models import Batch, BatchConfig, Job, JobStatus, ValidationError
@@ -25,14 +25,20 @@ _MIME_BY_SUFFIX = {
 
 
 def _job_config(store: Store, batch: Batch, settings: Settings) -> BatchConfig:
-    """Configuración para regenerar: la sesión del usuario o la del lote."""
+    """Configuración para regenerar: la sesión del usuario o la del lote.
+
+    GEN-15: la concurrencia nacida de la UI se recorta SIEMPRE al rango del
+    selector (1-4), aunque la sesión ignore el punto de partida de ``.env``.
+    """
     if st.session_state.get("lote_model"):
         return BatchConfig(
             model=st.session_state["lote_model"],
             resolution=st.session_state.get("lote_resolution", "2k"),
             aspect_ratio=st.session_state.get("lote_ratio", "auto"),
             quality=st.session_state.get("lote_quality"),
-            concurrency=st.session_state.get("lote_concurrency", settings.concurrency),
+            concurrency=ui_default_concurrency(
+                st.session_state.get("lote_concurrency", settings.concurrency)
+            ),
         )
     return batch.config
 

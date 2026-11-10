@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from visualforge.config import REPO_ROOT, load_settings
-from visualforge.models import ValidationError
+from visualforge.config import REPO_ROOT, load_settings, ui_default_concurrency
+from visualforge.models import UI_CONCURRENCY_MAX, UI_CONCURRENCY_MIN, ValidationError
 
 
 @pytest.fixture(autouse=True)
@@ -65,6 +65,26 @@ def test_concurrencia_se_limita(monkeypatch: pytest.MonkeyPatch) -> None:
     assert load_settings().concurrency == 8
     monkeypatch.setenv("VISUALFORGE_CONCURRENCY", "0")
     assert load_settings().concurrency == 1
+
+
+def test_gen15_ui_default_concurrency_recorta_al_rango_del_slider() -> None:
+    """GEN-15: el default del slider queda SIEMPRE dentro de 1..4.
+
+    El valor de arranque de ``.env`` (1-8) es una preferencia, no un techo:
+    por encima de 4 solo recorta el valor inicial del control, la UI nunca
+    se amplía a 8 y con ``.env=8`` el slider se sigue creando sin romperse.
+    """
+    assert ui_default_concurrency(0) == 1
+    assert ui_default_concurrency(1) == 1
+    assert ui_default_concurrency(2) == 2   # default: 2
+    assert ui_default_concurrency(3) == 3
+    assert ui_default_concurrency(4) == 4
+    assert ui_default_concurrency(5) == 4
+    assert ui_default_concurrency(8) == 4   # .env=8 no rompe la creación de controles
+
+    for value in range(-5, 20):
+        clipped = ui_default_concurrency(value)
+        assert UI_CONCURRENCY_MIN <= clipped <= UI_CONCURRENCY_MAX
 
 
 def test_provider_invalido(monkeypatch: pytest.MonkeyPatch) -> None:
